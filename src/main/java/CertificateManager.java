@@ -6,15 +6,14 @@ import sun.security.x509.*;
 import javax.net.ssl.*;
 import javax.xml.bind.DatatypeConverter;
 import java.io.*;
+import java.math.BigInteger;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.*;
+import java.security.cert.*;
 import java.security.cert.Certificate;
-import java.security.cert.CertificateEncodingException;
-import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Base64;
-import java.util.UUID;
 
 public class CertificateManager {
 
@@ -70,7 +69,17 @@ public class CertificateManager {
             trustStore = KeyStore.getInstance("pkcs12");
 
 
+            keyStore.load(null, null);
+            trustStore.load(null, null);
 
+            generateAgentChain();
+
+            //trust self
+            addCertificatesToTrustStore(keyStoreAlias, getPublicCertificate());
+
+
+
+/*
             if(keyStorePath.toFile().exists() && trustStorePath.toFile().exists()) {
                 keyStore.load(new FileInputStream(keyStorePath.toFile()),keyStorePassword);
                 trustStore.load(new FileInputStream(trustStorePath.toFile()),trustStorePassword);
@@ -88,7 +97,7 @@ public class CertificateManager {
                 keyStore.store(new FileOutputStream(trustStorePath.toFile()),trustStorePassword);
 
             }
-
+*/
 
         } catch(Exception ex) {
             System.out.println("CertificateChainGeneration() Error: " + ex.getMessage());
@@ -146,9 +155,17 @@ public class CertificateManager {
         return  certChain;
     }
 
-    private void generateCertChain() {
+    private void generateRegionChain() {
         try{
 
+            /*
+            CN: CommonName
+            OU: OrganizationalUnit
+            O: Organization
+            L: Locality
+            S: StateOrProvinceName
+            C: CountryName
+            */
 
             //Generate ROOT certificate
             CertAndKeyGen keyGen=new CertAndKeyGen("RSA","SHA256WithRSA",null);
@@ -156,25 +173,253 @@ public class CertificateManager {
             PrivateKey rootPrivateKey=keyGen.getPrivateKey();
 
             //X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name("CN=ROOT"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
-            X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name("CN=ROOT, OU=myTeam, O=MyOrg, L=Lexington, ST=KY, C=US"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+            //X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name("CN=ROOT, OU=myTeam, O=MyOrg, L=Lexington, ST=KY, C=US"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+            X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name("CN=region-3424, OU=region_id"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
 
-            System.out.println("KEY TO STRING: " + keyToString(rootPrivateKey));
+            String privateKeyContent = keyToString(rootPrivateKey);
+            String publicKeyContent = certToString(rootCertificate);
 
-            String rootCertString = certToString(rootCertificate);
-            System.out.println("CERT TO STRING: " + rootCertString);
+            //System.out.println("PRIVATE: [" + privateKeyContent + "]");
+            //System.out.println("PUBLIC: [" + publicKeyContent + "]");
+
+            rootPrivateKey = stringToKey(privateKeyContent);
+            rootCertificate = stringToCert(publicKeyContent);
 
 
+            Signature rsas = Signature.getInstance("SHA256WithRSA");
+            rsas.initSign(rootPrivateKey);
+            rsas.update("TEST MESSAGE".getBytes());
 
-            //String rootCertString = gson.toJson(rootCertificate);
-            //rootCertificate = null;
+            byte[] realSig = rsas.sign();
+
+            Signature rsav = Signature.getInstance("SHA256WithRSA");
+            rsav.initVerify(rootCertificate);
+            rsav.update("TEST MESSAGE".getBytes());
+
+            boolean verifies = rsav.verify(realSig);
+
+            System.out.println("signature verifies: " + verifies);
+
+            //Generate intermediate certificate
+            CertAndKeyGen keyGen1=new CertAndKeyGen("RSA","SHA256WithRSA",null);
+            keyGen1.generate(keySize);
+            PrivateKey middlePrivateKey=keyGen1.getPrivateKey();
+
+            //X509Certificate middleCertificate = keyGen1.getSelfCertificate(new X500Name("CN=MIDDLE, OU=myTeam, O=MyOrg, L=Lexington, ST=KY, C=US"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+            X509Certificate middleCertificate_pre = keyGen1.getSelfCertificate(new X500Name("CN=agent-000, OU=agent_id"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+
+            //Generate leaf certificate
+            CertAndKeyGen keyGen2=new CertAndKeyGen("RSA","SHA256WithRSA",null);
+            keyGen2.generate(keySize);
+            PrivateKey topPrivateKey=keyGen2.getPrivateKey();
+
+            //X509Certificate topCertificate = keyGen2.getSelfCertificate(new X500Name("CN=TOP, OU=myTeam, O=MyOrg, L=Lexington, ST=KY, C=US"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+            X509Certificate topCertificate = keyGen2.getSelfCertificate(new X500Name("CN=plugin-000, OU=plugin_id"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+
+            X509Certificate[] certificates = new X509Certificate[2];
+            certificates[0] = middleCertificate_pre;
+            certificates[1] = rootCertificate;
+
+            addCertificatesToTrustStore("whut", certificates);
 
 
-            rootCertificate = (javax.security.cert.X509Certificate)CertificateFactory
-                    .getInstance("X509")
-                    .generateCertificate(
-                            // string encoded with default charset
-                            new ByteArrayInputStream(rootCertString.getBytes())
-                    );
+            rootCertificate   = createSignedCertificate(rootCertificate,rootCertificate,rootPrivateKey);
+            X509Certificate middleCertificate = createSignedCertificate(middleCertificate_pre,rootCertificate,rootPrivateKey);
+            topCertificate    = createSignedCertificate(topCertificate,middleCertificate_pre,middlePrivateKey);
+
+
+            chain = new X509Certificate[3];
+            chain[0]=topCertificate;
+            chain[1]=middleCertificate;
+            chain[2]=rootCertificate;
+
+            //Store the certificate chain
+            storeKeyAndCertificateChain(keyStoreAlias, keyStorePassword, topPrivateKey, chain);
+
+            signingCertificate = middleCertificate;
+            signingKey = middlePrivateKey;
+
+            //check cert
+            addCertificatesToTrustStore(keyStoreAlias, chain);
+
+            CertPathBuilder certPathBuilder = CertPathBuilder.getInstance("PKIX");
+            X509CertSelector certSelector = new X509CertSelector();
+            certSelector.setCertificate(middleCertificate);
+
+            CertPathParameters certPathParameters = new PKIXBuilderParameters(trustStore, certSelector);
+            CertPathBuilderResult certPathBuilderResult = certPathBuilder.build(certPathParameters);
+            CertPath certPath = certPathBuilderResult.getCertPath();
+
+            final CertPathValidator certPathValidator = CertPathValidator.getInstance("PKIX");
+            final PKIXParameters validationParameters = new PKIXParameters(trustStore);
+            validationParameters.setRevocationEnabled(true); // if you want to check CRL
+            final X509CertSelector keyUsageSelector = new X509CertSelector();
+            keyUsageSelector.setKeyUsage(new boolean[] { true, false, true }); // to check digitalSignature and keyEncipherment bits
+            validationParameters.setTargetCertConstraints(keyUsageSelector);
+            PKIXCertPathValidatorResult result = (PKIXCertPathValidatorResult) certPathValidator.validate(certPath, validationParameters);
+
+            System.out.println(result);
+
+            System.exit(0);
+
+
+        }catch(Exception ex){
+            ex.printStackTrace();
+        }
+    }
+
+    private void generateAgentChain() {
+        try{
+
+            /*
+            CN: CommonName
+            OU: OrganizationalUnit
+            O: Organization
+            L: Locality
+            S: StateOrProvinceName
+            C: CountryName
+            */
+
+            String agent_id = "agent-000";
+            String plugin_id = "plugin-000";
+
+            String agentCN = "CN=" + agent_id;
+            String pluginCNOU = "CN=" + agent_id + ", OU=" + plugin_id;
+
+            //Generate ROOT certificate
+            CertAndKeyGen keyGen=new CertAndKeyGen("RSA","SHA256WithRSA",null);
+            keyGen.generate(keySize);
+            PrivateKey rootPrivateKey=keyGen.getPrivateKey();
+
+            //X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name("CN=ROOT"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+            //X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name("CN=ROOT, OU=myTeam, O=MyOrg, L=Lexington, ST=KY, C=US"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+            X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name(agentCN), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+
+            String privateKeyContent = keyToString(rootPrivateKey);
+            String publicKeyContent = certToString(rootCertificate);
+
+            //System.out.println("PRIVATE: [" + privateKeyContent + "]");
+            //System.out.println("PUBLIC: [" + publicKeyContent + "]");
+
+            rootPrivateKey = stringToKey(privateKeyContent);
+            rootCertificate = stringToCert(publicKeyContent);
+
+
+            Signature rsas = Signature.getInstance("SHA256WithRSA");
+            rsas.initSign(rootPrivateKey);
+            rsas.update("TEST MESSAGE".getBytes());
+
+            byte[] realSig = rsas.sign();
+
+            String sig = Base64.getEncoder().encodeToString(realSig);
+
+            System.out.println("SIG [" + sig + "]");
+
+            Signature rsav = Signature.getInstance("SHA256WithRSA");
+            rsav.initVerify(rootCertificate);
+            rsav.update("TEST MESSAGE".getBytes());
+
+            byte[] decorVal = Base64.getDecoder().decode(sig);
+
+            boolean verifies = rsav.verify(decorVal);
+
+            System.out.println("signature verifies: " + verifies);
+
+            //Generate intermediate certificate
+            CertAndKeyGen keyGen1=new CertAndKeyGen("RSA","SHA256WithRSA",null);
+            keyGen1.generate(keySize);
+            PrivateKey middlePrivateKey=keyGen1.getPrivateKey();
+
+            //X509Certificate middleCertificate = keyGen1.getSelfCertificate(new X500Name("CN=MIDDLE, OU=myTeam, O=MyOrg, L=Lexington, ST=KY, C=US"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+            X509Certificate middleCertificate_pre = keyGen1.getSelfCertificate(new X500Name(pluginCNOU), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+
+            rootCertificate   = createSignedCertificate(rootCertificate,rootCertificate,rootPrivateKey);
+            X509Certificate middleCertificate = createSignedCertificate(middleCertificate_pre,rootCertificate,rootPrivateKey);
+
+
+            trustStore.setCertificateEntry("root",rootCertificate);
+            trustStore.setCertificateEntry("middle",middleCertificate);
+
+            chain = new X509Certificate[2];
+            chain[0]=middleCertificate;
+            chain[1]=rootCertificate;
+
+            //Store the certificate chain
+            storeKeyAndCertificateChain(keyStoreAlias, keyStorePassword, middlePrivateKey, chain);
+
+            signingCertificate = middleCertificate;
+            signingKey = middlePrivateKey;
+
+            //check cert
+            //addCertificatesToTrustStore(keyStoreAlias, chain);
+
+            CertPathBuilder certPathBuilder = CertPathBuilder.getInstance("PKIX");
+            X509CertSelector certSelector = new X509CertSelector();
+            certSelector.setCertificate(middleCertificate);
+
+            CertPathParameters certPathParameters = new PKIXBuilderParameters(trustStore, certSelector);
+            CertPathBuilderResult certPathBuilderResult = certPathBuilder.build(certPathParameters);
+            CertPath certPath = certPathBuilderResult.getCertPath();
+
+            CertPathValidator certPathValidator = CertPathValidator.getInstance("PKIX");
+            PKIXParameters validationParameters = new PKIXParameters(trustStore);
+            validationParameters.setRevocationEnabled(true); // if you want to check CRL
+            validationParameters.setAnyPolicyInhibited(true);
+            validationParameters.setExplicitPolicyRequired(true);
+            validationParameters.setPolicyMappingInhibited(true);
+            X509CertSelector keyUsageSelector = new X509CertSelector();
+            keyUsageSelector.setKeyUsage(new boolean[] { true, false, true }); // to check digitalSignature and keyEncipherment bits
+            validationParameters.setTargetCertConstraints(keyUsageSelector);
+            PKIXCertPathValidatorResult result = (PKIXCertPathValidatorResult) certPathValidator.validate(certPath, validationParameters);
+
+            System.out.println(result);
+
+
+            TrustAnchor anc = result.getTrustAnchor();
+            X509Certificate xc = anc.getTrustedCert();
+            System.out.println("Subject DN: " + xc.getSubjectDN());
+            System.out.println("Issuer DN: " + xc.getIssuerDN());
+
+            System.exit(0);
+
+
+        }catch(Exception ex){
+            ex.printStackTrace();
+        }
+    }
+
+
+    private void generatePluginChain() {
+        try{
+
+            /*
+            CN: CommonName
+            OU: OrganizationalUnit
+            O: Organization
+            L: Locality
+            S: StateOrProvinceName
+            C: CountryName
+            */
+
+            //Generate ROOT certificate
+            CertAndKeyGen keyGen=new CertAndKeyGen("RSA","SHA256WithRSA",null);
+            keyGen.generate(keySize);
+            PrivateKey rootPrivateKey=keyGen.getPrivateKey();
+
+            //X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name("CN=ROOT"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+            //X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name("CN=ROOT, OU=myTeam, O=MyOrg, L=Lexington, ST=KY, C=US"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+            X509Certificate rootCertificate = keyGen.getSelfCertificate(new X500Name("CN=agent-3424, OU=agent_id"), (long) (365 * 24 * 60 * 60) * YEARS_VALID);
+
+            String privateKeyContent = keyToString(rootPrivateKey);
+            String publicKeyContent = certToString(rootCertificate);
+
+            //System.out.println("PRIVATE: [" + privateKeyContent + "]");
+            //System.out.println("PUBLIC: [" + publicKeyContent + "]");
+
+            rootPrivateKey = stringToKey(privateKeyContent);
+            rootCertificate = stringToCert(publicKeyContent);
+
+
 
             //rootCertificate = gson.fromJson(rootCertString,X509Certificate.class);
 
@@ -195,12 +440,12 @@ public class CertificateManager {
 
             rootCertificate   = createSignedCertificate(rootCertificate,rootCertificate,rootPrivateKey);
             middleCertificate = createSignedCertificate(middleCertificate,rootCertificate,rootPrivateKey);
-            topCertificate    = createSignedCertificate(topCertificate,middleCertificate,middlePrivateKey);
+            //topCertificate    = createSignedCertificate(topCertificate,middleCertificate,middlePrivateKey);
 
-            chain = new X509Certificate[3];
-            chain[0]=topCertificate;
-            chain[1]=middleCertificate;
-            chain[2]=rootCertificate;
+            chain = new X509Certificate[2];
+            //chain[0]=topCertificate;
+            chain[0]=middleCertificate;
+            chain[1]=rootCertificate;
 
             //String alias = "mykey";
             //String keystore = "testkeys.jks";
@@ -219,6 +464,7 @@ public class CertificateManager {
             ex.printStackTrace();
         }
     }
+
 
     public TrustManager[] getTrustManagers() {
         TrustManager[] trustManagers = null;
@@ -285,12 +531,14 @@ public class CertificateManager {
             //info.set(X509CertInfo.ISSUER, new CertificateIssuerName((X500Name) issuer));
 
             //No need to add the BasicContraint for leaf cert
+
             if(!cetrificate.getSubjectDN().getName().equals("CN=TOP")){
                 CertificateExtensions exts=new CertificateExtensions();
                 BasicConstraintsExtension bce = new BasicConstraintsExtension(true, -1);
                 exts.set(BasicConstraintsExtension.NAME,new BasicConstraintsExtension(false, bce.getExtensionValue()));
                 info.set(X509CertInfo.EXTENSIONS, exts);
             }
+
 
             X509CertImpl outCert = new X509CertImpl(info);
             outCert.sign(issuerPrivateKey, issuerSigAlg);
@@ -633,12 +881,37 @@ System.out.println("Decoded value is " + new String(valueDecoded));
         keyStore.store(new FileOutputStream(keystore),password);
     }
 
+
+    public PrivateKey stringToKey(String certString) {
+        PrivateKey privateKey = null;
+        try {
+            certString = certString.replaceAll("\\n", "").replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "");
+            KeyFactory kf = KeyFactory.getInstance("RSA");
+            PKCS8EncodedKeySpec keySpecPKCS8 = new PKCS8EncodedKeySpec(Base64.getDecoder().decode(certString));
+            privateKey = kf.generatePrivate(keySpecPKCS8);
+
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+        return privateKey;
+    }
+
+    public X509Certificate stringToCert(String certString) {
+        X509Certificate certificate =  null;
+        try {
+            certificate = (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(new ByteArrayInputStream(certString.getBytes()));
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+        return certificate;
+    }
+
     public String certToString(X509Certificate cert) {
         StringWriter sw = new StringWriter();
         try {
-            sw.write("-----BEGIN CERTIFICATE-----\n");
+            sw.write("-----BEGIN PUBLIC KEY-----\n");
             sw.write(DatatypeConverter.printBase64Binary(cert.getEncoded()).replaceAll("(.{64})", "$1\n"));
-            sw.write("\n-----END CERTIFICATE-----\n");
+            sw.write("\n-----END PUBLIC KEY-----\n");
         } catch (CertificateEncodingException e) {
             e.printStackTrace();
         }
@@ -648,9 +921,9 @@ System.out.println("Decoded value is " + new String(valueDecoded));
     public String keyToString(PrivateKey privateKey) {
         StringWriter sw = new StringWriter();
         try {
-            sw.write("-----BEGIN RSA PRIVATE KEY-----\n");
+            sw.write("-----BEGIN PRIVATE KEY-----\n");
             sw.write(DatatypeConverter.printBase64Binary(privateKey.getEncoded()).replaceAll("(.{64})", "$1\n"));
-            sw.write("\n-----END RSA PRIVATE KEY-----\n");
+            sw.write("\n-----END PRIVATE KEY-----\n");
         } catch (Exception e) {
             e.printStackTrace();
         }
